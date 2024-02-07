@@ -11,16 +11,18 @@ library(tidyverse)
 # set up 3 populations, sample 1 individual per pop
 num.demes <- 3
 
-demes <- fscSettingsDemes(fscDeme(15000, 1), fscDeme(15000, 1), fscDeme(10000, 1))
+demes <- fscSettingsDemes(fscDeme(15000, 100), fscDeme(15000, 100), fscDeme(10000, 100))
+
+# parameters - to calculate MAF for each population, sample 10% of abundance
 
 # questions - set population sizes based on recent abundance estimates?
 
 # set up SNPs of sequence length 1 on 1000 chromosomes (no linkage), mutation rate 1e-6 
-genetics <- fscSettingsGenetics(fscBlock_snp(1, 1e-6), num.chrom = 1000)
+genetics <- fscSettingsGenetics(fscBlock_snp(1, 1e-6), num.chrom = 300)
 
-# questions - should sequence.length be longer per recommendation from Excoffier?
-#           - set number of chromosomes to the number of SNPs in the NWFSC panel?
-#           - get mutation rate estimate from reference panel from each population? or est for salmon?
+# parameters - setting 300 SNPs for comparability with NWFSC salmon SNP panel
+
+# questions - get mutation rate estimate from reference panel from each population? or est for salmon?
 
 # set up mutation rate variability
 m.vec <- c(0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05)
@@ -31,36 +33,69 @@ mig.rate <- m.vec / (num.demes - 1)
 zero.mig <- matrix(data = 1, nrow = num.demes, ncol = num.demes)
 diag(zero.mig) <- 0
   
-migration <- fscSettingsMigration(matrix(rep(mig.rate[1], num.demes ^ 2), nrow = num.demes) * zero.mig,
-                       matrix(rep(mig.rate[2], num.demes ^ 2), nrow = num.demes) * zero.mig,
-                       matrix(rep(mig.rate[3], num.demes ^ 2), nrow = num.demes) * zero.mig,
-                       matrix(rep(mig.rate[4], num.demes ^ 2), nrow = num.demes) * zero.mig,
-                       matrix(rep(mig.rate[5], num.demes ^ 2), nrow = num.demes) * zero.mig,
-                       matrix(rep(mig.rate[6], num.demes ^ 2), nrow = num.demes) * zero.mig)
-  
+p.list <- lapply(1:length(mig.rate), function(i) {
+
 # write settings file and run simulation
 p <- fscWrite(
     demes = demes,
-    migration = migration,
+    migration = fscSettingsMigration(matrix(rep(mig.rate[i], num.demes ^ 2), nrow = num.demes) * zero.mig),
     genetics = genetics, 
     label = "sim3deme.varymig",
     use.wd = TRUE
   )
   
-p <- fscRun(p, all.sites = F, inf.sites = T, exec = "fsc28")
+p <- fscRun(p, all.sites = F, inf.sites = FALSE, exec = "fsc28")
 
-# question - is there a way to set this up so that it loops through all of the matrices in the migration 
-# settings object? 
-  
+})
+
+#### Use simulated data to estimate maf and generate random mixture samples ----
+
 # read the genetic data
   
-arp.file <- fscReadArp(p)
+arp.list <- lapply(1:length(p.list), function(i) {
+  
+  arp <- fscReadArp(p.list[[i]])
+  
+})
 
-maf <- arp.file %>% 
-  pivot_longer(-c(id, deme), names_to = "locus", values_to= "allele") %>% 
+# generate allele frequencies at each locus for all values of migration
+
+maf <- bind_rows(arp.list, .id = "runID") %>% 
+  pivot_longer(-c(runID, id, deme), names_to = "locus", values_to= "allele") %>% 
   separate(locus, sep = "\\.", into = c("locus","position")) %>% 
-  group_by(locus) %>% 
+  group_by(runID, deme, locus) %>% 
   count(allele) %>% 
   mutate(prop.allele = n/sum(n))
 
+# generate mixture samples
+# 10 per migration value
 
+mixture.sample <- data.frame()
+mixture.samples_all <- data.frame()
+
+for (k in 1:length(arp.list)){
+  for (i in 1:10) {
+    mixture.sample.i <- arp.list[[k]] %>% 
+      sample_n(2, replace = FALSE) %>% 
+      pivot_longer(-c(id, deme), names_to = "locus", values_to= "allele") %>% 
+      separate(locus, sep = "\\.", into = c("locus","position")) %>% 
+      count(locus,allele) %>% 
+      # mutate(prop.allele = n/sum(n)) %>% 
+      mutate(sampleID = i)
+    
+    mixture.sample <- bind_rows(mixture.sample, mixture.sample.i)
+  }
+  
+  runID <- k
+  
+  mixture.sample <- mixture.sample %>% 
+    mutate(runID = k)
+  
+  mixture.samples_all <- bind_rows(mixture.samples_all, mixture.sample)
+  
+}
+
+#what input format do the two algorithms take? do i need pivot wider?
+mixture.samples_wide <- mixture.samples_all %>% 
+  unite(col = "locus", locus:allele, sep = "_") %>% 
+  pivot_wider(id_cols = c(sampleID, runID), names_from = "locus", values_from = "n", values_fill = 0)
